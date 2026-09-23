@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">PandaPlay</string>
+    <string name="import_game">+ Importar jogo</string>
+    <string name="empty_library">Nenhum jogo ainda.\nToque em \"Importar jogo\" e escolha arquivos .gba, .gb ou .gbc dos seus cartuchos.</string>
+</resources>
