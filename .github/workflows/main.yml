@@ -1,0 +1,49 @@
+name: Gerar APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Baixar core mGBA
+        run: |
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          curl -fL https://buildbot.libretro.com/nightly/android/latest/arm64-v8a/mgba_libretro_android.so.zip -o /tmp/mgba.zip
+          unzip -o -q /tmp/mgba.zip -d /tmp
+          mv -f /tmp/mgba_libretro_android.so app/src/main/jniLibs/arm64-v8a/libmgba_libretro_android.so
+
+      - name: Compilar APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Renomear APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk PandaPlay-${{ github.run_number }}.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PandaPlay-apk
+          path: PandaPlay-${{ github.run_number }}.apk
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: PandaPlay build ${{ github.run_number }}
+          files: PandaPlay-${{ github.run_number }}.apk
+          prerelease: true
