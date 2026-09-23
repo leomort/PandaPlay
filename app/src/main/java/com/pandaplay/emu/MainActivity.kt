@@ -20,6 +20,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.zip.ZipInputStream
 
 /**
  * Biblioteca de jogos. Funciona com toque, mouse, teclado,
@@ -121,20 +122,52 @@ class MainActivity : AppCompatActivity() {
         withContext(Dispatchers.IO) {
             for (uri in uris) {
                 val name = displayName(uri) ?: continue
-                val ext = name.substringAfterLast('.', "").lowercase()
-                if (ext !in GameStorage.SUPPORTED_EXTENSIONS) { skipped++; continue }
-                contentResolver.openInputStream(uri)?.use { input ->
-                    File(storage.romsDir, name).outputStream().use { input.copyTo(it) }
+                when (name.substringAfterLast('.', "").lowercase()) {
+                    in GameStorage.SUPPORTED_EXTENSIONS -> {
+                        contentResolver.openInputStream(uri)?.use { input ->
+                            File(storage.romsDir, name).outputStream().use { input.copyTo(it) }
+                        }
+                        imported++
+                    }
+                    "zip" -> {
+                        val found = importFromZip(uri)
+                        if (found > 0) imported += found else skipped++
+                    }
+                    else -> skipped++
                 }
-                imported++
             }
         }
         val msg = buildString {
             append("$imported jogo(s) importado(s)")
-            if (skipped > 0) append(" • $skipped ignorado(s): use .gba, .gb ou .gbc")
+            if (skipped > 0) append(" • $skipped ignorado(s): use .gba, .gb, .gbc ou .zip com um desses dentro")
         }
         Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
         refresh()
+    }
+
+    /**
+     * Extrai de um .zip apenas os arquivos de jogo suportados (.gba/.gb/.gbc).
+     * Usa só o nome do arquivo (sem as pastas internas do zip) para evitar
+     * que um zip malicioso grave fora da pasta de jogos ("zip slip").
+     */
+    private fun importFromZip(uri: Uri): Int {
+        var count = 0
+        contentResolver.openInputStream(uri)?.use { raw ->
+            ZipInputStream(raw.buffered()).use { zip ->
+                var entry = zip.nextEntry
+                while (entry != null) {
+                    val fileName = File(entry.name).name
+                    val ext = fileName.substringAfterLast('.', "").lowercase()
+                    if (!entry.isDirectory && ext in GameStorage.SUPPORTED_EXTENSIONS) {
+                        File(storage.romsDir, fileName).outputStream().use { zip.copyTo(it) }
+                        count++
+                    }
+                    zip.closeEntry()
+                    entry = zip.nextEntry
+                }
+            }
+        }
+        return count
     }
 
     private fun importSave(uri: Uri, rom: File) = lifecycleScope.launch {
