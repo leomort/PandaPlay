@@ -1,5 +1,6 @@
 package com.pandaplay.emu
 
+import android.content.res.Configuration
 import android.hardware.input.InputManager
 import android.os.Bundle
 import android.util.Log
@@ -9,6 +10,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -22,6 +24,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.swordfish.libretrodroid.GLRetroView
 import com.swordfish.libretrodroid.GLRetroViewData
 import com.swordfish.libretrodroid.ShaderConfig
+import com.swordfish.libretrodroid.Variable
 import com.swordfish.radialgamepad.library.RadialGamePad
 import com.swordfish.radialgamepad.library.event.Event
 import kotlinx.coroutines.Dispatchers
@@ -44,8 +47,6 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
         const val EXTRA_ROM_PATH = "rom_path"
         private const val TAG = "PandaPlay"
 
-        /** Nome do arquivo em app/src/main/jniLibs/<abi>/ (o script de download já renomeia). */
-        private const val CORE_MGBA = "libmgba_libretro_android.so"
 
         private const val AUTOSAVE_INTERVAL_MS = 15_000L
         private const val FAST_SPEED = 3
@@ -53,6 +54,7 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
 
     private lateinit var storage: GameStorage
     private lateinit var rom: File
+    private lateinit var platform: Platform
     private lateinit var retroView: GLRetroView
 
     private lateinit var padsRow: View
@@ -70,17 +72,23 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
         storage = GameStorage(this)
         rom = File(intent.getStringExtra(EXTRA_ROM_PATH) ?: run { finish(); return })
 
-        val corePath = File(applicationInfo.nativeLibraryDir, CORE_MGBA)
+        platform = Platform.of(rom) ?: run {
+            Toast.makeText(this, "Formato de jogo não suportado", Toast.LENGTH_LONG).show()
+            finish(); return
+        }
+
+        val corePath = File(applicationInfo.nativeLibraryDir, platform.coreFile)
         if (!corePath.exists()) {
             Toast.makeText(
                 this,
-                "Core mGBA não encontrado. Rode o script scripts/baixar-cores antes de compilar.",
+                "O emulador de ${platform.label} não veio neste APK. Confira o passo \"Baixar cores\" no GitHub Actions.",
                 Toast.LENGTH_LONG
             ).show()
             finish(); return
         }
 
         lastSram = storage.readSram(rom)
+        LibraryPrefs(this).markPlayed(rom)
 
         val data = GLRetroViewData(this).apply {
             coreFilePath = corePath.absolutePath
@@ -88,7 +96,9 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
             systemDirectory = storage.systemDir.absolutePath
             savesDirectory = storage.savesDir.absolutePath
             saveRAMState = lastSram          // restaura o save do jogo (ex: progresso no Pokémon)
-            shader = ShaderConfig.Sharp      // pixels nítidos, sem borrão
+            // 2D: pixels nítidos. 3D (N64, PS1): filtro padrão, que fica melhor em polígonos.
+            shader = if (platform.is3D) ShaderConfig.Default else ShaderConfig.Sharp
+            variables = platform.coreOptions.map { Variable(it.first, it.second) }.toTypedArray()
             preferLowLatencyAudio = true
             rumbleEventsEnabled = true
         }
@@ -186,10 +196,19 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
     }
 
     private fun setupVirtualPad() {
-        val left = RadialGamePad(GbaPadConfig.LEFT, 8f, this).apply {
+        // Nintendo DS em pé: as duas telas precisam de mais espaço que o controle
+        if (platform.touchScreen && resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT) {
+            val container = findViewById<View>(R.id.gameContainer)
+            (container.layoutParams as? LinearLayout.LayoutParams)?.let {
+                it.weight = 1.7f
+                container.layoutParams = it
+            }
+        }
+
+        val left = RadialGamePad(platform.pad.left, 8f, this).apply {
             gravityX = -1f; gravityY = 1f
         }
-        val right = RadialGamePad(GbaPadConfig.RIGHT, 8f, this).apply {
+        val right = RadialGamePad(platform.pad.right, 8f, this).apply {
             gravityX = 1f; gravityY = 1f
         }
         findViewById<FrameLayout>(R.id.leftPad).addView(left)
@@ -248,7 +267,7 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
             return true
         }
 
-        InputMapper.hotkeyFor(event)?.let { hotkey ->
+        InputMapper.hotkeyFor(event, platform)?.let { hotkey ->
             if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) runHotkey(hotkey)
             return true
         }
@@ -271,21 +290,53 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
         return super.dispatchKeyEvent(event)
     }
 
-    /** Direcional digital e analógico esquerdo movem o personagem (o GBA não tem analógico). */
+    private var l2Down = false
+    private var r2Down = false
+
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
         val isJoystick = (event.source and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
-        if (isJoystick && event.action == MotionEvent.ACTION_MOVE) {
-            val port = ((event.device?.controllerNumber ?: 1) - 1).coerceAtLeast(0)
-            var x = event.getAxisValue(MotionEvent.AXIS_HAT_X)
-            var y = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
-            if (abs(x) < 0.5f && abs(y) < 0.5f) {
-                x = deadzone(event.getAxisValue(MotionEvent.AXIS_X))
-                y = deadzone(event.getAxisValue(MotionEvent.AXIS_Y))
+        if (!isJoystick || event.action != MotionEvent.ACTION_MOVE) {
+            return super.dispatchGenericMotionEvent(event)
+        }
+        val port = ((event.device?.controllerNumber ?: 1) - 1).coerceAtLeast(0)
+
+        if (platform.analog) {
+            // N64 e PS1: direcional, analógico esquerdo e direito vão direto para o jogo
+            retroView.sendMotionEvent(
+                GLRetroView.MOTION_SOURCE_DPAD,
+                event.getAxisValue(MotionEvent.AXIS_HAT_X), event.getAxisValue(MotionEvent.AXIS_HAT_Y), port
+            )
+            retroView.sendMotionEvent(
+                GLRetroView.MOTION_SOURCE_ANALOG_LEFT,
+                event.getAxisValue(MotionEvent.AXIS_X), event.getAxisValue(MotionEvent.AXIS_Y), port
+            )
+            retroView.sendMotionEvent(
+                GLRetroView.MOTION_SOURCE_ANALOG_RIGHT,
+                event.getAxisValue(MotionEvent.AXIS_Z), event.getAxisValue(MotionEvent.AXIS_RZ), port
+            )
+            // Gatilhos analógicos (controles de Xbox, por exemplo) viram L2/R2
+            val l2 = maxOf(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE)) > 0.5f
+            val r2 = maxOf(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS)) > 0.5f
+            if (l2 != l2Down) {
+                l2Down = l2
+                retroView.sendKeyEvent(if (l2) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BUTTON_L2, port)
             }
-            retroView.sendMotionEvent(GLRetroView.MOTION_SOURCE_DPAD, x, y, port)
+            if (r2 != r2Down) {
+                r2Down = r2
+                retroView.sendKeyEvent(if (r2) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BUTTON_R2, port)
+            }
             return true
         }
-        return super.dispatchGenericMotionEvent(event)
+
+        // Consoles 2D: direcional digital e analógico esquerdo movem o personagem
+        var x = event.getAxisValue(MotionEvent.AXIS_HAT_X)
+        var y = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
+        if (abs(x) < 0.5f && abs(y) < 0.5f) {
+            x = deadzone(event.getAxisValue(MotionEvent.AXIS_X))
+            y = deadzone(event.getAxisValue(MotionEvent.AXIS_Y))
+        }
+        retroView.sendMotionEvent(GLRetroView.MOTION_SOURCE_DPAD, x, y, port)
+        return true
     }
 
     private fun deadzone(v: Float) = when {

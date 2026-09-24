@@ -12,4 +12,33 @@
         <item name="android:textColor">#FFFFFF</item>
         <item name="android:textSize">14sp</item>
     </style>
+
+    <style name="Chip">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">40dp</item>
+        <item name="android:layout_marginEnd">8dp</item>
+        <item name="android:background">@drawable/chip_bg</item>
+        <item name="android:focusable">true</item>
+        <item name="android:clickable">true</item>
+        <item name="android:gravity">center</item>
+        <item name="android:paddingStart">16dp</item>
+        <item name="android:paddingEnd">16dp</item>
+        <item name="android:textColor">#F1F3F5</item>
+        <item name="android:textSize">14sp</item>
+    </style>
+
+    <style name="SearchBox">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">48dp</item>
+        <item name="android:layout_marginTop">12dp</item>
+        <item name="android:background">@drawable/input_bg</item>
+        <item name="android:imeOptions">actionSearch</item>
+        <item name="android:inputType">text</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:paddingStart">16dp</item>
+        <item name="android:paddingEnd">16dp</item>
+        <item name="android:textColor">#F1F3F5</item>
+        <item name="android:textColorHint">#9AA3AD</item>
+        <item name="android:textSize">16sp</item>
+    </style>
 </resources>

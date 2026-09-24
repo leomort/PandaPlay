@@ -7,32 +7,21 @@
     android:paddingTop="20dp"
     android:paddingEnd="20dp">
 
-    <LinearLayout
+    <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:gravity="center_vertical"
-        android:orientation="horizontal">
+        android:text="🎁 Jogos grátis"
+        android:textColor="@color/text"
+        android:textSize="26sp"
+        android:textStyle="bold" />
 
-        <TextView
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="@string/app_name"
-            android:textColor="@color/text"
-            android:textSize="26sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/btnStore"
-            style="@style/Chip"
-            android:text="🎁 Jogos grátis" />
-
-        <TextView
-            android:id="@+id/btnImport"
-            style="@style/Chip"
-            android:layout_marginEnd="0dp"
-            android:text="+ Importar" />
-    </LinearLayout>
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="Jogos independentes liberados pelos próprios autores, via Homebrew Hub (hh.gbdev.io)."
+        android:textColor="@color/muted"
+        android:textSize="13sp" />
 
     <HorizontalScrollView
         android:layout_width="match_parent"
@@ -41,7 +30,7 @@
         android:scrollbars="none">
 
         <LinearLayout
-            android:id="@+id/filters"
+            android:id="@+id/platforms"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:orientation="horizontal" />
@@ -50,23 +39,21 @@
     <EditText
         android:id="@+id/search"
         style="@style/SearchBox"
-        android:hint="🔍 Buscar na biblioteca" />
+        android:hint="🔍 Buscar jogos grátis (toque Enter)" />
 
     <TextView
-        android:id="@+id/emptyView"
+        android:id="@+id/status"
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:gravity="center"
-        android:text="@string/empty_library"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
         android:textColor="@color/muted"
-        android:textSize="16sp" />
+        android:textSize="13sp" />
 
     <ListView
-        android:id="@+id/gameList"
+        android:id="@+id/storeList"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_marginTop="12dp"
+        android:layout_marginTop="8dp"
         android:layout_weight="1"
         android:clipToPadding="false"
         android:divider="@android:color/transparent"

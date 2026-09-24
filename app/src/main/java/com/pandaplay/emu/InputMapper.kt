@@ -28,9 +28,9 @@ object InputMapper {
     )
 
     /**
-     * Teclado e controle remoto da TV -> botões do GBA.
-     *   Setas = direcional | X = A | Z = B | A = L | S = R
-     *   Enter = START | Backspace/Shift = SELECT
+     * Teclado e controle remoto da TV -> botões do controle.
+     *   Setas = direcional | X = A | Z = B | S = X | A = Y
+     *   Q = L | W = R | 1 = L2 | 2 = R2 | Enter = START | Backspace/Shift = SELECT
      *   OK/centro do controle remoto da TV = A
      */
     private val keyboardToGamepad = mapOf(
@@ -41,8 +41,12 @@ object InputMapper {
         KeyEvent.KEYCODE_DPAD_CENTER to KeyEvent.KEYCODE_BUTTON_A,
         KeyEvent.KEYCODE_X to KeyEvent.KEYCODE_BUTTON_A,
         KeyEvent.KEYCODE_Z to KeyEvent.KEYCODE_BUTTON_B,
-        KeyEvent.KEYCODE_A to KeyEvent.KEYCODE_BUTTON_L1,
-        KeyEvent.KEYCODE_S to KeyEvent.KEYCODE_BUTTON_R1,
+        KeyEvent.KEYCODE_S to KeyEvent.KEYCODE_BUTTON_X,
+        KeyEvent.KEYCODE_A to KeyEvent.KEYCODE_BUTTON_Y,
+        KeyEvent.KEYCODE_Q to KeyEvent.KEYCODE_BUTTON_L1,
+        KeyEvent.KEYCODE_W to KeyEvent.KEYCODE_BUTTON_R1,
+        KeyEvent.KEYCODE_1 to KeyEvent.KEYCODE_BUTTON_L2,
+        KeyEvent.KEYCODE_2 to KeyEvent.KEYCODE_BUTTON_R2,
         KeyEvent.KEYCODE_ENTER to KeyEvent.KEYCODE_BUTTON_START,
         KeyEvent.KEYCODE_DEL to KeyEvent.KEYCODE_BUTTON_SELECT,
         KeyEvent.KEYCODE_SHIFT_RIGHT to KeyEvent.KEYCODE_BUTTON_SELECT,
@@ -54,8 +58,15 @@ object InputMapper {
             (src and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
     }
 
-    fun hotkeyFor(event: KeyEvent): Hotkey? =
-        if (isGamepad(event)) gamepadHotkeys[event.keyCode] else keyboardHotkeys[event.keyCode]
+    /**
+     * Consoles que usam L2/R2/L3 (N64, PlayStation) não recebem atalhos no controle,
+     * para não roubar botões do jogo. Neles, use os botões da tela ou o teclado.
+     */
+    fun hotkeyFor(event: KeyEvent, platform: Platform): Hotkey? = when {
+        !isGamepad(event) -> keyboardHotkeys[event.keyCode]
+        platform.usesTriggers -> null
+        else -> gamepadHotkeys[event.keyCode]
+    }
 
     fun keyboardToGamepad(keyCode: Int): Int? = keyboardToGamepad[keyCode]
 
