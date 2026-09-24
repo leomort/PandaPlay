@@ -140,52 +140,119 @@ class MainActivity : AppCompatActivity() {
     // ---------------------------------------------------------------- traduções (patches)
 
     private fun onPatchPicked(uri: Uri, rom: File) = lifecycleScope.launch {
-        val name = displayName(uri) ?: "patch"
-        val ext = name.substringAfterLast('.', "").lowercase()
+        val name = displayName(uri) ?: "arquivo"
+        val bytes = try {
+            withContext(Dispatchers.IO) { contentResolver.openInputStream(uri)?.use { it.readBytes() } }
+        } catch (e: Exception) {
+            null
+        }
+        if (bytes == null || bytes.isEmpty()) {
+            showError("Não foi possível ler o arquivo", "Tente copiar o arquivo para a pasta Downloads e escolher de novo.")
+            return@launch
+        }
 
-        when {
-            Patcher.isPatchName(name) -> {
-                val bytes = withContext(Dispatchers.IO) {
-                    contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                } ?: return@launch
-                applyPatch(rom, name, bytes)
-            }
-            ext == "zip" -> {
-                val patches = withContext(Dispatchers.IO) { readPatchesFromZip(uri) }
-                when (patches.size) {
-                    0 -> toastLong("Nenhum patch (.ips, .ups, .bps) encontrado dentro do .zip")
-                    1 -> applyPatch(rom, patches[0].first, patches[0].second)
-                    else -> AlertDialog.Builder(this@MainActivity)
+        // Identifica pelo conteúdo, não só pelo nome (alguns apps de arquivos escondem a extensão).
+        when (sniff(bytes)) {
+            Kind.PATCH -> applyPatch(rom, name, bytes)
+            Kind.ZIP -> {
+                val content = try {
+                    withContext(Dispatchers.IO) { scanZip(bytes) }
+                } catch (e: Exception) {
+                    showError(
+                        "Não foi possível abrir o .zip",
+                        "O arquivo parece estar corrompido ou usa uma compressão não suportada.\n" +
+                            "Extraia com o ZArchiver e escolha o arquivo .ips, .ups ou .bps diretamente."
+                    )
+                    return@launch
+                }
+                when {
+                    content.patches.size == 1 ->
+                        applyPatch(rom, content.patches[0].first, content.patches[0].second)
+                    content.patches.size > 1 -> AlertDialog.Builder(this@MainActivity)
                         .setTitle("Escolha o patch")
-                        .setItems(patches.map { it.first }.toTypedArray()) { _, i ->
-                            applyPatch(rom, patches[i].first, patches[i].second)
+                        .setItems(content.patches.map { it.first }.toTypedArray()) { _, i ->
+                            applyPatch(rom, content.patches[i].first, content.patches[i].second)
                         }
                         .show()
+                    content.archives.isNotEmpty() -> showError(
+                        "O patch está dentro de outro arquivo compactado",
+                        "Dentro deste .zip há: ${content.archives.joinToString()}.\n\n" +
+                            "Extraia com o ZArchiver até chegar no arquivo .ips, .ups ou .bps e escolha ele."
+                    )
+                    content.games.isNotEmpty() -> showError(
+                        "Esse .zip é um jogo, não uma tradução",
+                        "Ele contém: ${content.games.joinToString()}.\n\n" +
+                            "Para aplicar a tradução, escolha o arquivo do patch (.ips, .ups ou .bps)."
+                    )
+                    else -> showError(
+                        "Nenhum patch encontrado",
+                        "Arquivos dentro do .zip: ${content.others.take(10).joinToString().ifEmpty { "(vazio)" }}"
+                    )
                 }
             }
-            ext == "7z" || ext == "rar" -> toastLong(
-                "Arquivos .$ext ainda não são suportados. Extraia com o ZArchiver e escolha o arquivo .ips, .ups ou .bps."
+            Kind.SEVEN_ZIP, Kind.RAR -> showError(
+                "Formato ainda não suportado",
+                "Este arquivo é .7z ou .rar. Abra no ZArchiver, toque em Extrair e depois escolha aqui o arquivo .ips, .ups ou .bps que saiu de dentro."
             )
-            else -> toastLong("Escolha um patch .ips, .ups, .bps ou um .zip que contenha um deles")
+            Kind.UNKNOWN -> showError(
+                "Arquivo não reconhecido",
+                "\"$name\" não é um patch .ips, .ups, .bps nem um .zip com um deles."
+            )
         }
     }
 
-    private fun readPatchesFromZip(uri: Uri): List<Pair<String, ByteArray>> {
-        val found = mutableListOf<Pair<String, ByteArray>>()
-        contentResolver.openInputStream(uri)?.use { raw ->
-            ZipInputStream(raw.buffered()).use { zip ->
-                var entry = zip.nextEntry
-                while (entry != null) {
+    private enum class Kind { PATCH, ZIP, SEVEN_ZIP, RAR, UNKNOWN }
+
+    private fun sniff(b: ByteArray): Kind {
+        fun starts(vararg magic: Int) = b.size >= magic.size &&
+            magic.indices.all { (b[it].toInt() and 0xFF) == magic[it] }
+        return when {
+            starts(0x50, 0x41, 0x54, 0x43, 0x48) -> Kind.PATCH   // "PATCH" (IPS)
+            starts(0x55, 0x50, 0x53, 0x31) -> Kind.PATCH         // "UPS1"
+            starts(0x42, 0x50, 0x53, 0x31) -> Kind.PATCH         // "BPS1"
+            starts(0x50, 0x4B, 0x03, 0x04) -> Kind.ZIP           // "PK.."
+            starts(0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C) -> Kind.SEVEN_ZIP
+            starts(0x52, 0x61, 0x72, 0x21) -> Kind.RAR           // "Rar!"
+            else -> Kind.UNKNOWN
+        }
+    }
+
+    private class ZipContent(
+        val patches: List<Pair<String, ByteArray>>,
+        val archives: List<String>,
+        val games: List<String>,
+        val others: List<String>,
+    )
+
+    /** Lê o .zip em memória e separa o que tem dentro. Detecta o patch pelo conteúdo. */
+    private fun scanZip(zipBytes: ByteArray): ZipContent {
+        val patches = mutableListOf<Pair<String, ByteArray>>()
+        val archives = mutableListOf<String>()
+        val games = mutableListOf<String>()
+        val others = mutableListOf<String>()
+        ZipInputStream(zipBytes.inputStream()).use { zip ->
+            var entry = zip.nextEntry
+            while (entry != null) {
+                if (!entry.isDirectory) {
                     val fileName = File(entry.name).name
-                    if (!entry.isDirectory && Patcher.isPatchName(fileName)) {
-                        found += fileName to zip.readBytes()
+                    val ext = fileName.substringAfterLast('.', "").lowercase()
+                    when {
+                        ext in GameStorage.SUPPORTED_EXTENSIONS -> games += fileName
+                        ext in setOf("zip", "7z", "rar") -> archives += fileName
+                        Patcher.isPatchName(fileName) -> patches += fileName to zip.readBytes()
+                        ext in setOf("txt", "nfo", "doc", "docx", "pdf", "png", "jpg", "url", "html") -> others += fileName
+                        else -> {
+                            // Sem extensão conhecida: confere se é um patch pelo cabeçalho
+                            val data = zip.readBytes()
+                            if (sniff(data) == Kind.PATCH) patches += fileName to data else others += fileName
+                        }
                     }
-                    zip.closeEntry()
-                    entry = zip.nextEntry
                 }
+                zip.closeEntry()
+                entry = zip.nextEntry
             }
         }
-        return found
+        return ZipContent(patches, archives, games, others)
     }
 
     private fun applyPatch(rom: File, patchName: String, patch: ByteArray, force: Boolean = false) {
