@@ -11,8 +11,9 @@ android {
         applicationId = "com.pandaplay.emu"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        // Cada compilação do GitHub Actions ganha um número maior (atualização normal no Android)
+        versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+        versionName = "2.0." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
 
         ndk {
             // Celulares, tablets e a maioria das TVs Android atuais.
@@ -21,7 +22,26 @@ android {
         }
     }
 
+    // Chave de assinatura FIXA: sem ela cada compilação sai com uma chave diferente
+    // e o Android se recusa a atualizar ("conflito com pacote existente").
+    // O GitHub Actions cria o arquivo a partir do secret DEBUG_KEYSTORE_BASE64.
+    val keystorePath = System.getenv("PANDAPLAY_KEYSTORE")
+    signingConfigs {
+        if (keystorePath != null && file(keystorePath).exists()) {
+            create("pandaplay") {
+                storeFile = file(keystorePath)
+                storeType = "pkcs12"
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfigs.findByName("pandaplay")?.let { signingConfig = it }
+        }
         release {
             isMinifyEnabled = false
         }
