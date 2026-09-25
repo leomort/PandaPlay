@@ -60,10 +60,16 @@
             android:text="+ Importar" />
     </LinearLayout>
 
+
+    <EditText
+        android:id="@+id/search"
+        style="@style/SearchBox"
+        android:hint="🔍 Buscar na biblioteca" />
+
     <HorizontalScrollView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
+        android:layout_marginTop="12dp"
         android:scrollbars="none">
 
         <LinearLayout
@@ -73,30 +79,26 @@
             android:orientation="horizontal" />
     </HorizontalScrollView>
 
-    <EditText
-        android:id="@+id/search"
-        style="@style/SearchBox"
-        android:hint="🔍 Buscar na biblioteca" />
-
-    <TextView
-        android:id="@+id/emptyView"
+    <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1"
-        android:gravity="center"
-        android:text="@string/empty_library"
-        android:textColor="@color/muted"
-        android:textSize="16sp" />
+        android:layout_weight="1">
 
-    <ListView
-        android:id="@+id/gameList"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_marginTop="12dp"
-        android:layout_weight="1"
-        android:clipToPadding="false"
-        android:divider="@android:color/transparent"
-        android:dividerHeight="8dp"
-        android:listSelector="@android:color/transparent"
-        android:paddingBottom="20dp" />
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/content"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:paddingBottom="24dp" />
+
+        <TextView
+            android:id="@+id/emptyView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            android:padding="16dp"
+            android:text="@string/empty_library"
+            android:textColor="@color/muted"
+            android:textSize="16sp" />
+    </FrameLayout>
 </LinearLayout>

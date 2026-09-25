@@ -61,6 +61,10 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
     private lateinit var btnFast: TextView
 
     private var fastForward = false
+
+    /** Tempo jogado: conta só enquanto a tela do jogo está aberta e ativa. */
+    private var sessionStart = 0L
+    private var libPrefs: LibraryPrefs? = null
     private var lastSram: ByteArray? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -88,7 +92,7 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
         }
 
         lastSram = storage.readSram(rom)
-        LibraryPrefs(this).markPlayed(rom)
+        libPrefs = LibraryPrefs(this).also { it.markPlayed(rom) }
 
         val data = GLRetroViewData(this).apply {
             coreFilePath = corePath.absolutePath
@@ -137,7 +141,17 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        sessionStart = System.currentTimeMillis()
+    }
+
     override fun onPause() {
+        if (sessionStart > 0 && ::rom.isInitialized) {
+            libPrefs?.addPlayTime(rom, System.currentTimeMillis() - sessionStart)
+            libPrefs?.markPlayed(rom)
+            sessionStart = 0
+        }
         // Aqui a emulação já está pausada, então lemos a SRAM direto, sem fila da thread GL.
         if (::retroView.isInitialized) persistSram(useEmulationThread = false)
         super.onPause()

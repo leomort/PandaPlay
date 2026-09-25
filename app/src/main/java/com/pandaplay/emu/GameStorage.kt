@@ -55,7 +55,7 @@ class GameStorage(context: Context) {
         if (cue.extension.lowercase() != "cue" || !cue.exists()) return emptyList()
         val regex = Regex("FILE\\s+\"([^\"]+)\"", RegexOption.IGNORE_CASE)
         return cue.readLines().mapNotNull { line ->
-            regex.find(line)?.groupValues?.get(1)?.let { File(romsDir, File(it).name) }
+            regex.find(line)?.groupValues?.get(1)?.let { File(cue.parentFile, File(it).name) }
         }.filter { it.exists() }
     }
 
@@ -65,7 +65,7 @@ class GameStorage(context: Context) {
         val regex = Regex("FILE\\s+\"([^\"]+)\"", RegexOption.IGNORE_CASE)
         return cue.readLines().mapNotNull { line -> regex.find(line)?.groupValues?.get(1) }
             .map { File(it).name }
-            .filter { !File(romsDir, it).exists() }
+            .filter { !File(cue.parentFile, it).exists() }
     }
 
     fun deleteGame(rom: File) {

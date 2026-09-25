@@ -1,65 +1,86 @@
 package com.pandaplay.emu
 
+import android.Manifest
+import android.app.UiModeManager
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Environment
+import android.provider.DocumentsContract
+import android.provider.OpenableColumns
+import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
 import android.text.format.DateUtils
-import android.net.Uri
-import android.os.Bundle
-import android.provider.OpenableColumns
 import android.view.LayoutInflater
 import android.view.View
-import android.view.ViewGroup
-import android.widget.ArrayAdapter
 import android.widget.EditText
-import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.pandaplay.emu.library.CardActions
+import com.pandaplay.emu.library.CardAdapter
+import com.pandaplay.emu.library.CardSize
+import com.pandaplay.emu.library.Game
+import com.pandaplay.emu.library.GameLibrary
+import com.pandaplay.emu.library.GameScanner
+import com.pandaplay.emu.library.SectionAdapter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.zip.CRC32
 import java.util.zip.ZipInputStream
 
 /**
- * Biblioteca de jogos, organizada por plataforma.
- * Funciona com toque, mouse, teclado, controle Bluetooth e controle remoto da TV
- * (todos os botões e a lista são navegáveis pelo direcional).
+ * Tela inicial: biblioteca estilo console.
+ *   - "Início": seções (Continuar jogando, Favoritos, Mais jogados, uma linha por console)
+ *   - "Todos" / um console / busca: grade de capas
+ * Navegável por toque, mouse, teclado, controle Bluetooth e controle remoto da TV.
  */
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity(), CardActions {
 
     private lateinit var storage: GameStorage
     private lateinit var libPrefs: LibraryPrefs
-    private lateinit var listView: ListView
+    private lateinit var library: GameLibrary
+    private lateinit var content: RecyclerView
     private lateinit var emptyView: TextView
     private lateinit var searchBox: EditText
     private lateinit var filtersRow: LinearLayout
+    private lateinit var cardSize: CardSize
 
-    private var allGames: List<File> = emptyList()
-    private var games: List<File> = emptyList()
-    private var filter: Filter = Filter.All
-    private var filterPlatform: Platform? = null
+    private var allGames: List<Game> = emptyList()
     private var coverJob: Job? = null
+    private var scanJob: Job? = null
+    private val cardAdapters = mutableListOf<CardAdapter>()
 
-    /** Filtros da biblioteca: gerais + um por plataforma (só aparecem as que têm jogos). */
-    private sealed class Filter(val label: String) {
-        object All : Filter("Todos")
-        object Recent : Filter("🕘 Recentes")
-        object Favorites : Filter("⭐ Favoritos")
-        class ByPlatform(val platform: Platform) : Filter(platform.label)
+    /** O que está na tela: início (seções), todos os jogos ou um console. */
+    private sealed class Mode(val label: String) {
+        object Home : Mode("🏠 Início")
+        object All : Mode("Todos")
+        class ByPlatform(val platform: Platform) : Mode(platform.shortLabel)
     }
 
-    private var chips: List<Filter> = emptyList()
+    private var mode: Mode = Mode.Home
+    private var chips: List<Mode> = emptyList()
 
     /** Jogo selecionado ao importar/exportar um save ou aplicar patch. */
     private var pendingSaveTarget: File? = null
+
+    /** Voltando da tela de permissão de arquivos: abrir o seletor de pasta. */
+    private var pendingFolderPick = false
 
     // Usa o seletor de arquivos do sistema (SAF): não precisa pedir permissão de armazenamento.
     private val pickRoms =
@@ -90,13 +111,26 @@ class MainActivity : AppCompatActivity() {
             if (uri != null && rom != null) exportSave(uri, rom)
         }
 
+    private val pickFolder =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            if (uri != null) onFolderPicked(uri)
+        }
+
+    private val requestReadPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) pickFolder.launch(null)
+            else toastLong("Sem permissão para ler os arquivos, a pasta não pode ser usada.")
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         storage = GameStorage(this)
         libPrefs = LibraryPrefs(this)
+        library = GameLibrary(storage, libPrefs)
+        cardSize = computeCardSize()
 
-        listView = findViewById(R.id.gameList)
+        content = findViewById(R.id.content)
         emptyView = findViewById(R.id.emptyView)
         searchBox = findViewById(R.id.search)
         filtersRow = findViewById(R.id.filters)
@@ -109,26 +143,380 @@ class MainActivity : AppCompatActivity() {
         searchBox.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
-            override fun afterTextChanged(s: Editable?) = applyFilter()
+            override fun afterTextChanged(s: Editable?) = render()
         })
-
-        listView.setOnItemClickListener { _, _, position, _ -> play(games[position]) }
-        listView.setOnItemLongClickListener { _, _, position, _ ->
-            showGameOptions(games[position]); true
-        }
     }
 
     override fun onResume() {
         super.onResume()
+        if (pendingFolderPick) {
+            pendingFolderPick = false
+            if (hasFilesPermission()) pickFolder.launch(null)
+            else toastLong("Sem a permissão de arquivos, a pasta não pode ser usada.")
+        }
         refresh()
+        // Pasta monitorada: procura jogos novos ao abrir o app (no máximo a cada 1 minuto)
+        if (libPrefs.folders().isNotEmpty() && System.currentTimeMillis() - libPrefs.lastScan() > 60_000) {
+            rescanFolders(showSummary = false)
+        }
     }
 
-    private fun showImportMenu() {
-        AlertDialog.Builder(this)
-            .setTitle("Importar")
-            .setItems(arrayOf("🎮 Jogos", "🧩 BIOS (PlayStation e outros)")) { _, which ->
-                if (which == 0) pickRoms.launch(arrayOf("*/*")) else showBiosHelp()
+    // ---------------------------------------------------------------- tela
+
+    /** Capas maiores na TV e em tablets. */
+    private fun computeCardSize(): CardSize {
+        val isTv = getSystemService(UiModeManager::class.java)?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION
+        val widthDp = resources.configuration.screenWidthDp
+        val coverDp = when {
+            isTv -> 150
+            widthDp >= 700 -> 140
+            else -> 112
+        }
+        val d = resources.displayMetrics.density
+        return CardSize((coverDp * d).toInt(), (coverDp * 4 / 3 * d).toInt())
+    }
+
+    private fun refresh() {
+        lifecycleScope.launch {
+            allGames = withContext(Dispatchers.IO) { library.loadAll() }
+            buildChips()
+            render()
+            fetchMissingCovers()
+        }
+    }
+
+    private fun buildChips() {
+        val platforms = Platform.entries.filter { p -> allGames.any { it.platform == p } }
+        chips = listOf(Mode.Home, Mode.All) + platforms.map { Mode.ByPlatform(it) }
+        val current = mode
+        if (current is Mode.ByPlatform && current.platform !in platforms) mode = Mode.Home
+
+        filtersRow.removeAllViews()
+        for (m in chips) {
+            val chip = LayoutInflater.from(this).inflate(R.layout.item_chip, filtersRow, false) as TextView
+            chip.text = m.label
+            chip.isSelected = isCurrent(m)
+            chip.setOnClickListener {
+                mode = m
+                for (i in 0 until filtersRow.childCount) filtersRow.getChildAt(i).isSelected = isCurrent(chips[i])
+                render()
             }
+            filtersRow.addView(chip)
+        }
+    }
+
+    private fun isCurrent(m: Mode): Boolean {
+        val cur = mode
+        return when {
+            m is Mode.ByPlatform && cur is Mode.ByPlatform -> m.platform == cur.platform
+            else -> m::class == cur::class
+        }
+    }
+
+    private fun render() {
+        cardAdapters.clear()
+        val query = searchBox.text?.toString().orEmpty()
+
+        if (allGames.isEmpty()) {
+            showEmpty(getString(R.string.empty_library)); return
+        }
+
+        val m = mode
+        if (query.isBlank() && m is Mode.Home) {
+            val sections = library.sections(allGames)
+            emptyView.visibility = View.GONE
+            content.visibility = View.VISIBLE
+            content.layoutManager = LinearLayoutManager(this)
+            content.adapter = SectionAdapter(sections, cardSize, lifecycleScope, this) { cardAdapters += it }
+            return
+        }
+
+        val base = when (m) {
+            is Mode.ByPlatform -> allGames.filter { it.platform == m.platform }
+            else -> allGames
+        }
+        val games = library.search(base, query)
+        if (games.isEmpty()) { showEmpty("Nenhum jogo encontrado."); return }
+
+        emptyView.visibility = View.GONE
+        content.visibility = View.VISIBLE
+        val cellPx = cardSize.coverWidthPx + (32 * resources.displayMetrics.density).toInt()
+        val span = (resources.displayMetrics.widthPixels / cellPx).coerceAtLeast(2)
+        content.layoutManager = GridLayoutManager(this, span)
+        val adapter = CardAdapter(games, cardSize, lifecycleScope, this)
+        cardAdapters += adapter
+        content.adapter = adapter
+    }
+
+    private fun showEmpty(msg: String) {
+        emptyView.text = msg
+        emptyView.visibility = View.VISIBLE
+        content.visibility = View.GONE
+    }
+
+    /** Baixa em segundo plano as capas que faltam e atualiza só os cards afetados. */
+    private fun fetchMissingCovers() {
+        coverJob?.cancel()
+        coverJob = lifecycleScope.launch {
+            for (g in allGames) {
+                if (g.coverFile.exists() || libPrefs.coverMissing(g.file)) continue
+                val got = withContext(Dispatchers.IO) { Covers.ensureCover(storage, libPrefs, g.file) }
+                if (got) cardAdapters.forEach { it.refreshGame(g.id) }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- ações dos cards
+
+    override fun onPlay(game: Game) = play(game.file)
+
+    override fun onOptions(game: Game) = showGameOptions(game)
+
+    private fun play(rom: File) {
+        val missing = storage.missingCueTracks(rom)
+        if (missing.isNotEmpty()) {
+            showError(
+                "Faltam arquivos do CD",
+                "Este jogo de PlayStation precisa também de: ${missing.joinToString()}.\n\n" +
+                    "Coloque esses arquivos na mesma pasta do .cue."
+            )
+            return
+        }
+        startActivity(
+            Intent(this, GameActivity::class.java)
+                .putExtra(GameActivity.EXTRA_ROM_PATH, rom.absolutePath)
+        )
+    }
+
+    private fun showGameOptions(game: Game) {
+        val rom = game.file
+        val fav = if (game.favorite) "☆ Remover dos favoritos" else "⭐ Favoritar"
+        val remove = if (game.source == Game.Source.FOLDER) "Ocultar da biblioteca" else "Remover da biblioteca"
+        val options = arrayOf(
+            "▶ Jogar",
+            fav,
+            "Aplicar tradução (patch)",
+            "Importar save (.sav/.srm)",
+            "Exportar save",
+            "Informações do jogo",
+            remove,
+        )
+        AlertDialog.Builder(this)
+            .setTitle(game.title)
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> play(rom)
+                    1 -> { libPrefs.toggleFavorite(rom); refresh() }
+                    2 -> { pendingSaveTarget = rom; pickPatch.launch(arrayOf("*/*")) }
+                    3 -> { pendingSaveTarget = rom; pickSave.launch(arrayOf("*/*")) }
+                    4 -> { pendingSaveTarget = rom; exportSave.launch(rom.nameWithoutExtension + ".sav") }
+                    5 -> showInfo(game)
+                    6 -> if (game.source == Game.Source.FOLDER) confirmHide(game) else confirmDelete(rom)
+                }
+            }
+            .show()
+    }
+
+    /** Mostra o CRC32 (conferir versão para traduções), local do arquivo e tempo jogado. */
+    private fun showInfo(game: Game) = lifecycleScope.launch {
+        val rom = game.file
+        val crc = withContext(Dispatchers.IO) { fileCrc(rom) }
+        val last = if (game.lastPlayed > 0)
+            DateUtils.getRelativeTimeSpanString(game.lastPlayed).toString() else "nunca"
+        AlertDialog.Builder(this@MainActivity)
+            .setTitle(game.title)
+            .setMessage(
+                "Console: ${game.platform.label}\n" +
+                    "Arquivo: ${rom.name}\n" +
+                    "Tamanho: ${formatSize(rom.length())}\n" +
+                    "Local: ${if (game.source == Game.Source.FOLDER) rom.parent else "dentro do app"}\n" +
+                    "Tempo jogado: ${Game.formatPlayTime(game.playTimeMs)}\n" +
+                    "Jogado por último: $last\n" +
+                    "CRC32: $crc\n\n" +
+                    "Confira o CRC32 com o informado na página da tradução antes de aplicar um patch."
+            )
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
+    /** CRC32 lendo o arquivo aos poucos (funciona até com jogos de PS1 de 700 MB). */
+    private fun fileCrc(file: File): String {
+        val crc = CRC32()
+        file.inputStream().buffered().use { input ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                crc.update(buf, 0, n)
+            }
+        }
+        return Patcher.crcHex(crc.value)
+    }
+
+    private fun formatSize(bytes: Long): String = when {
+        bytes >= 1024L * 1024 * 1024 -> "%.1f GB".format(bytes / (1024.0 * 1024 * 1024))
+        bytes >= 1024L * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024))
+        else -> "${bytes / 1024} KB"
+    }
+
+    private fun confirmDelete(rom: File) {
+        AlertDialog.Builder(this)
+            .setTitle("Remover ${Game.cleanTitle(rom.nameWithoutExtension)}?")
+            .setMessage("O jogo, o save e os save states serão apagados deste aparelho. Exporte o save antes se quiser guardar o progresso.")
+            .setPositiveButton("Remover") { _, _ -> storage.deleteGame(rom); refresh() }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun confirmHide(game: Game) {
+        AlertDialog.Builder(this)
+            .setTitle("Ocultar ${game.title}?")
+            .setMessage("O arquivo continua na sua pasta, só deixa de aparecer no PandaPlay. Para mostrar de novo: + Importar → Pastas monitoradas → Mostrar ocultos.")
+            .setPositiveButton("Ocultar") { _, _ -> libPrefs.hide(game.id); refresh() }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    // ---------------------------------------------------------------- importar e pastas
+
+    private fun showImportMenu() {
+        val folderCount = libPrefs.folders().size
+        val items = arrayOf(
+            "📁 Adicionar pasta de jogos (sem copiar)",
+            "📂 Pastas monitoradas" + if (folderCount > 0) " ($folderCount)" else "",
+            "🎮 Importar arquivos de jogos",
+            "🧩 BIOS (PlayStation)",
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Adicionar jogos")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> startAddFolder()
+                    1 -> showFolders()
+                    2 -> pickRoms.launch(arrayOf("*/*"))
+                    3 -> showBiosHelp()
+                }
+            }
+            .show()
+    }
+
+    private fun hasFilesPermission(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) Environment.isExternalStorageManager()
+        else ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) ==
+            PackageManager.PERMISSION_GRANTED
+
+    /**
+     * Para ler os jogos direto da pasta (sem copiar), o Android pede a permissão
+     * "Acesso a todos os arquivos". O PandaPlay só lê as pastas que você escolher.
+     */
+    private fun startAddFolder() {
+        if (hasFilesPermission()) { pickFolder.launch(null); return }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            AlertDialog.Builder(this)
+                .setTitle("Permitir acesso aos arquivos")
+                .setMessage(
+                    "Para jogar direto da sua pasta, sem copiar os jogos (importante para PS1 e DS, que são grandes), " +
+                        "o Android pede a permissão \"Acesso a todos os arquivos\".\n\n" +
+                        "Na próxima tela, ative a chave do PandaPlay e volte."
+                )
+                .setPositiveButton("Continuar") { _, _ ->
+                    pendingFolderPick = true
+                    try {
+                        startActivity(
+                            Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))
+                        )
+                    } catch (e: Exception) {
+                        try {
+                            startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                        } catch (e2: Exception) {
+                            pendingFolderPick = false
+                            showError(
+                                "Não disponível neste aparelho",
+                                "Este aparelho não tem a tela dessa permissão. Use \"Importar arquivos de jogos\"."
+                            )
+                        }
+                    }
+                }
+                .setNegativeButton("Cancelar", null)
+                .show()
+        } else {
+            requestReadPermission.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+    }
+
+    private fun onFolderPicked(uri: Uri) {
+        val path = treeUriToPath(uri)
+        if (path == null || !File(path).isDirectory) {
+            showError(
+                "Pasta não suportada",
+                "Escolha uma pasta do armazenamento do aparelho ou do cartão SD. Pastas de nuvem (Drive, OneDrive) ainda não funcionam aqui."
+            )
+            return
+        }
+        libPrefs.addFolder(path)
+        rescanFolders(showSummary = true)
+    }
+
+    /** Converte a pasta escolhida no seletor do Android para um caminho de arquivo. */
+    private fun treeUriToPath(uri: Uri): String? {
+        if (uri.authority != "com.android.externalstorage.documents") return null
+        val docId = DocumentsContract.getTreeDocumentId(uri) ?: return null
+        val volume = docId.substringBefore(':')
+        val relative = docId.substringAfter(':', "")
+        val base = if (volume.equals("primary", ignoreCase = true))
+            Environment.getExternalStorageDirectory().absolutePath
+        else "/storage/$volume"
+        return if (relative.isEmpty()) base else "$base/$relative"
+    }
+
+    private fun rescanFolders(showSummary: Boolean) {
+        scanJob?.cancel()
+        scanJob = lifecycleScope.launch {
+            if (showSummary) toastLong("🔎 Procurando jogos…")
+            val before = libPrefs.scannedPaths()
+            val found = withContext(Dispatchers.IO) { GameScanner.scan(libPrefs.folders()) }
+            libPrefs.setScannedPaths(found)
+            val newOnes = found - before
+            refresh()
+
+            if (showSummary) {
+                val counts = GameScanner.countByPlatform(found)
+                val lines = if (counts.isEmpty()) "Nenhum jogo encontrado nas pastas."
+                else counts.entries.joinToString("\n") { "${it.key.label}: ${it.value}" } + "\n\nTotal: ${found.size} jogos"
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Biblioteca atualizada")
+                    .setMessage(lines)
+                    .setPositiveButton("OK", null)
+                    .show()
+            } else if (newOnes.isNotEmpty()) {
+                toastLong("${newOnes.size} jogo(s) novo(s) encontrado(s)")
+            }
+        }
+    }
+
+    private fun showFolders() {
+        val folders = libPrefs.folders().sorted()
+        val builder = AlertDialog.Builder(this).setTitle("Pastas monitoradas")
+        if (folders.isEmpty()) {
+            builder.setMessage("Nenhuma pasta ainda. Use \"Adicionar pasta de jogos\".")
+                .setPositiveButton("Adicionar pasta") { _, _ -> startAddFolder() }
+        } else {
+            builder.setItems(folders.map { "📁 $it" }.toTypedArray()) { _, i -> confirmRemoveFolder(folders[i]) }
+                .setPositiveButton("🔄 Procurar jogos novos") { _, _ -> rescanFolders(showSummary = true) }
+                .setNeutralButton("Mostrar ocultos") { _, _ -> libPrefs.unhideAll(); refresh() }
+        }
+        builder.setNegativeButton("Fechar", null).show()
+    }
+
+    private fun confirmRemoveFolder(path: String) {
+        AlertDialog.Builder(this)
+            .setTitle("Parar de monitorar esta pasta?")
+            .setMessage("$path\n\nOs arquivos não são apagados. Os jogos dela só saem da biblioteca.")
+            .setPositiveButton("Remover") { _, _ ->
+                libPrefs.removeFolder(path)
+                rescanFolders(showSummary = false)
+            }
+            .setNegativeButton("Cancelar", null)
             .show()
     }
 
@@ -157,139 +545,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
         toastLong(if (names.isEmpty()) "Nenhum arquivo importado" else "BIOS importada: ${names.joinToString()}")
-    }
-
-    private fun buildFilterChips() {
-        val platformsWithGames = Platform.entries.filter { p -> allGames.any { Platform.of(it) == p } }
-        val newChips = listOf(Filter.All, Filter.Recent, Filter.Favorites) +
-            platformsWithGames.map { Filter.ByPlatform(it) }
-
-        // Se a plataforma selecionada ficou sem jogos, volta para "Todos"
-        if (filterPlatform != null && filterPlatform !in platformsWithGames) {
-            filter = Filter.All; filterPlatform = null
-        }
-        chips = newChips
-        filtersRow.removeAllViews()
-        for (f in chips) {
-            val chip = LayoutInflater.from(this).inflate(R.layout.item_chip, filtersRow, false) as TextView
-            chip.text = f.label
-            chip.isSelected = isCurrent(f)
-            chip.setOnClickListener {
-                filter = f
-                filterPlatform = (f as? Filter.ByPlatform)?.platform
-                for (i in 0 until filtersRow.childCount) {
-                    filtersRow.getChildAt(i).isSelected = isCurrent(chips[i])
-                }
-                applyFilter()
-            }
-            filtersRow.addView(chip)
-        }
-    }
-
-    private fun isCurrent(f: Filter): Boolean = when (f) {
-        is Filter.ByPlatform -> filterPlatform == f.platform
-        else -> filterPlatform == null && f::class == filter::class
-    }
-
-    private fun refresh() {
-        allGames = storage.listGames()
-        buildFilterChips()
-        applyFilter()
-        fetchMissingCovers()
-    }
-
-    private fun applyFilter() {
-        val query = searchBox.text?.toString()?.trim()?.lowercase().orEmpty()
-        var list = allGames.filter { query.isEmpty() || it.nameWithoutExtension.lowercase().contains(query) }
-        list = when (val f = filter) {
-            is Filter.All -> list
-            is Filter.Favorites -> list.filter { libPrefs.isFavorite(it) }
-            is Filter.Recent -> list.filter { libPrefs.lastPlayed(it) > 0 }
-                .sortedByDescending { libPrefs.lastPlayed(it) }
-            is Filter.ByPlatform -> list.filter { Platform.of(it) == f.platform }
-        }
-        games = list
-
-        val emptyLibrary = allGames.isEmpty()
-        emptyView.text = when {
-            emptyLibrary -> getString(R.string.empty_library)
-            filter is Filter.Favorites && query.isEmpty() -> "Nenhum favorito ainda.\nSegure o dedo em um jogo e escolha \"Favoritar\"."
-            filter is Filter.Recent && query.isEmpty() -> "Você ainda não jogou nada por aqui."
-            else -> "Nenhum jogo encontrado."
-        }
-        emptyView.visibility = if (games.isEmpty()) View.VISIBLE else View.GONE
-        listView.visibility = if (games.isEmpty()) View.GONE else View.VISIBLE
-        listView.adapter = GameAdapter(games)
-    }
-
-    /** Baixa em segundo plano as capas que ainda faltam (uma de cada vez, sem travar a tela). */
-    private fun fetchMissingCovers() {
-        coverJob?.cancel()
-        coverJob = lifecycleScope.launch {
-            for (rom in allGames) {
-                if (storage.coverFile(rom).exists() || libPrefs.coverMissing(rom)) continue
-                val got = withContext(Dispatchers.IO) { Covers.ensureCover(storage, libPrefs, rom) }
-                if (got) (listView.adapter as? GameAdapter)?.notifyDataSetChanged()
-            }
-        }
-    }
-
-    private fun play(rom: File) {
-        val missing = storage.missingCueTracks(rom)
-        if (missing.isNotEmpty()) {
-            showError(
-                "Faltam arquivos do CD",
-                "Este jogo de PlayStation precisa também de: ${missing.joinToString()}.\n\n" +
-                    "Toque em \"+ Importar\" e selecione esses arquivos junto com o .cue."
-            )
-            return
-        }
-        startActivity(
-            Intent(this, GameActivity::class.java)
-                .putExtra(GameActivity.EXTRA_ROM_PATH, rom.absolutePath)
-        )
-    }
-
-    private fun showGameOptions(rom: File) {
-        val fav = if (libPrefs.isFavorite(rom)) "☆ Remover dos favoritos" else "⭐ Favoritar"
-        val options = arrayOf(
-            "Jogar",
-            fav,
-            "Aplicar tradução (patch)",
-            "Importar save (.sav/.srm)",
-            "Exportar save",
-            "Informações do jogo",
-            "Remover da biblioteca",
-        )
-        AlertDialog.Builder(this)
-            .setTitle(rom.nameWithoutExtension)
-            .setItems(options) { _, which ->
-                when (which) {
-                    0 -> play(rom)
-                    1 -> { libPrefs.toggleFavorite(rom); applyFilter() }
-                    2 -> { pendingSaveTarget = rom; pickPatch.launch(arrayOf("*/*")) }
-                    3 -> { pendingSaveTarget = rom; pickSave.launch(arrayOf("*/*")) }
-                    4 -> { pendingSaveTarget = rom; exportSave.launch(rom.nameWithoutExtension + ".sav") }
-                    5 -> showInfo(rom)
-                    6 -> confirmDelete(rom)
-                }
-            }
-            .show()
-    }
-
-    /** Mostra o CRC32: é o que as páginas de tradução pedem para conferir a versão certa. */
-    private fun showInfo(rom: File) = lifecycleScope.launch {
-        val crc = withContext(Dispatchers.IO) { Patcher.crcHex(Patcher.crc32(rom.readBytes())) }
-        AlertDialog.Builder(this@MainActivity)
-            .setTitle(rom.nameWithoutExtension)
-            .setMessage(
-                "Sistema: ${GameStorage.systemLabel(rom)}\n" +
-                    "Tamanho: ${rom.length() / 1024} KB\n" +
-                    "CRC32: $crc\n\n" +
-                    "Confira esse CRC32 com o informado na página da tradução antes de aplicar o patch."
-            )
-            .setPositiveButton("OK", null)
-            .show()
     }
 
     // ---------------------------------------------------------------- traduções (patches)
@@ -460,15 +715,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun toastLong(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
 
-    private fun confirmDelete(rom: File) {
-        AlertDialog.Builder(this)
-            .setTitle("Remover ${rom.nameWithoutExtension}?")
-            .setMessage("O jogo, o save e os save states serão apagados deste aparelho. Exporte o save antes se quiser guardar o progresso.")
-            .setPositiveButton("Remover") { _, _ -> storage.deleteGame(rom); refresh() }
-            .setNegativeButton("Cancelar", null)
-            .show()
-    }
-
     private fun importRoms(uris: List<Uri>) = lifecycleScope.launch {
         var imported = 0
         var skipped = 0
@@ -532,33 +778,4 @@ class MainActivity : AppCompatActivity() {
             ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
             ?.replace('/', '_')
 
-    private inner class GameAdapter(items: List<File>) :
-        ArrayAdapter<File>(this@MainActivity, 0, items) {
-
-        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-            val view = convertView
-                ?: LayoutInflater.from(context).inflate(R.layout.item_game, parent, false)
-            val rom = getItem(position)!!
-            val star = if (libPrefs.isFavorite(rom)) "⭐ " else ""
-            view.findViewById<TextView>(R.id.title).text = star + rom.nameWithoutExtension
-
-            val details = mutableListOf(GameStorage.systemLabel(rom))
-            if (storage.sramFile(rom).exists()) details += "com save"
-            val last = libPrefs.lastPlayed(rom)
-            if (last > 0) details += "jogado " + DateUtils.getRelativeTimeSpanString(last).toString().lowercase()
-            view.findViewById<TextView>(R.id.subtitle).text = details.joinToString("  •  ")
-
-            val cover = view.findViewById<ImageView>(R.id.cover)
-            val coverFile = storage.coverFile(rom)
-            cover.tag = coverFile.absolutePath
-            cover.setImageBitmap(null)
-            if (coverFile.exists()) {
-                lifecycleScope.launch {
-                    val bmp = withContext(Dispatchers.IO) { Covers.load(coverFile) }
-                    if (cover.tag == coverFile.absolutePath) cover.setImageBitmap(bmp)
-                }
-            }
-            return view
-        }
-    }
 }
