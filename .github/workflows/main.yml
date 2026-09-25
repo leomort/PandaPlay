@@ -52,11 +52,25 @@ jobs:
             echo "::error::Configure o secret DEBUG_KEYSTORE_BASE64 em Settings > Secrets and variables > Actions"
             exit 1
           fi
-          mkdir -p ~/.android
-          echo "$DEBUG_KEYSTORE" | base64 -d > ~/.android/debug.keystore
+          echo "$DEBUG_KEYSTORE" | tr -d ' \r\n' | base64 -d > "$RUNNER_TEMP/pandaplay.keystore"
+          echo "PANDAPLAY_KEYSTORE=$RUNNER_TEMP/pandaplay.keystore" >> "$GITHUB_ENV"
+          keytool -list -keystore "$RUNNER_TEMP/pandaplay.keystore" -storepass android -storetype PKCS12 | tail -3
 
       - name: Compilar APK
         run: gradle assembleDebug --no-daemon
+
+      - name: Conferir assinatura (deve ser SEMPRE a mesma)
+        run: |
+          ESPERADO=ceca2e512e6a7af499b0b4eb3591833217424d34af4d20b5dce31f654bfcf55f
+          BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          ATUAL=$("$ANDROID_HOME/build-tools/$BT/apksigner" verify --print-certs app/build/outputs/apk/debug/app-debug.apk \
+            | grep -i "certificate SHA-256 digest" | head -1 | awk '{print $NF}')
+          echo "Assinatura do APK: $ATUAL"
+          if [ "$ATUAL" != "$ESPERADO" ]; then
+            echo "::error::APK assinado com uma chave diferente da chave fixa. O celular não vai aceitar como atualização."
+            exit 1
+          fi
+          echo "✅ Assinado com a chave fixa do PandaPlay"
 
       - name: Renomear APK
         run: cp app/build/outputs/apk/debug/app-debug.apk PandaPlay-${{ github.run_number }}.apk
