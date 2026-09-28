@@ -4,6 +4,7 @@ import android.content.res.Configuration
 import android.hardware.input.InputManager
 import android.os.Bundle
 import android.util.Log
+import android.view.Gravity
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -125,6 +126,7 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
 
         getSystemService(InputManager::class.java).registerInputDeviceListener(this, null)
         updatePadVisibility()
+        applyLayout()
     }
 
     // ---------------------------------------------------------------- saves
@@ -210,15 +212,6 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
     }
 
     private fun setupVirtualPad() {
-        // Nintendo DS em pé: as duas telas precisam de mais espaço que o controle
-        if (platform.touchScreen && resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT) {
-            val container = findViewById<View>(R.id.gameContainer)
-            (container.layoutParams as? LinearLayout.LayoutParams)?.let {
-                it.weight = 1.7f
-                container.layoutParams = it
-            }
-        }
-
         val left = RadialGamePad(platform.pad.left, 8f, this).apply {
             gravityX = -1f; gravityY = 1f
         }
@@ -244,6 +237,57 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
     /** Com controle físico conectado, o controle virtual some e o jogo ganha a tela toda. */
     private fun updatePadVisibility() {
         padsRow.visibility = if (InputMapper.hasPhysicalGamepad()) View.GONE else View.VISIBLE
+        applyLayout()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        applyLayout()
+    }
+
+    /**
+     * Organiza a tela conforme a posição do aparelho, sem reiniciar o jogo:
+     *  - deitado: jogo ocupa a tela toda e o controle fica por cima, semitransparente, nas laterais
+     *  - em pé: jogo em cima e controle embaixo (o DS ganha mais espaço para as duas telas)
+     *  - com controle físico: jogo usa a tela toda nas duas posições
+     */
+    private fun applyLayout() {
+        val root = findViewById<View>(R.id.gameRoot) ?: return
+        root.post {
+            val d = resources.displayMetrics.density
+            val game = findViewById<View>(R.id.gameContainer) ?: return@post
+            val left = findViewById<View>(R.id.leftPad)
+            val right = findViewById<View>(R.id.rightPad)
+            val spacer = findViewById<View>(R.id.padSpacer)
+            val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+            val padsVisible = padsRow.visibility == View.VISIBLE
+            val full = FrameLayout.LayoutParams.MATCH_PARENT
+
+            if (landscape || !padsVisible) {
+                game.layoutParams = FrameLayout.LayoutParams(full, full)
+                padsRow.layoutParams = FrameLayout.LayoutParams(full, full)
+                padsRow.alpha = 0.7f
+                val side = (210 * d).toInt()
+                left?.layoutParams = LinearLayout.LayoutParams(side, full, 0f)
+                right?.layoutParams = LinearLayout.LayoutParams(side, full, 0f)
+                spacer?.layoutParams = LinearLayout.LayoutParams(0, full, 1f)
+            } else {
+                val height = root.height.takeIf { it > 0 } ?: resources.displayMetrics.heightPixels
+                val top = (56 * d).toInt() // espaço dos botões ⏩ 💾 📂
+                val fraction = if (platform.touchScreen) 0.60f else 0.48f
+                val gameHeight = (height * fraction).toInt()
+                game.layoutParams = FrameLayout.LayoutParams(full, gameHeight).apply {
+                    topMargin = top; gravity = Gravity.TOP
+                }
+                padsRow.layoutParams = FrameLayout.LayoutParams(full, height - gameHeight - top).apply {
+                    gravity = Gravity.BOTTOM
+                }
+                padsRow.alpha = 1f
+                left?.layoutParams = LinearLayout.LayoutParams(0, full, 1f)
+                right?.layoutParams = LinearLayout.LayoutParams(0, full, 1f)
+                spacer?.layoutParams = LinearLayout.LayoutParams(0, full, 0f)
+            }
+        }
     }
 
     override fun onInputDeviceAdded(deviceId: Int) = updatePadVisibility()
