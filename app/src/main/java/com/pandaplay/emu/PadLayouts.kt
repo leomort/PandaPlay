@@ -6,6 +6,7 @@ import com.swordfish.radialgamepad.library.config.CrossConfig
 import com.swordfish.radialgamepad.library.config.PrimaryDialConfig
 import com.swordfish.radialgamepad.library.config.RadialGamePadConfig
 import com.swordfish.radialgamepad.library.config.SecondaryDialConfig
+import com.swordfish.radialgamepad.library.haptics.HapticConfig
 
 /**
  * Controles virtuais na tela para cada console.
@@ -19,11 +20,36 @@ import com.swordfish.radialgamepad.library.config.SecondaryDialConfig
  */
 object PadLayouts {
 
-    class Layout(val left: RadialGamePadConfig, val right: RadialGamePadConfig)
+    const val DPAD = 0          // GLRetroView.MOTION_SOURCE_DPAD
+    const val ANALOG_LEFT = 1   // GLRetroView.MOTION_SOURCE_ANALOG_LEFT
+    const val ANALOG_RIGHT = 2  // GLRetroView.MOTION_SOURCE_ANALOG_RIGHT
 
-    private const val DPAD = 0         // GLRetroView.MOTION_SOURCE_DPAD
-    private const val ANALOG_LEFT = 1  // GLRetroView.MOTION_SOURCE_ANALOG_LEFT
-    private const val ANALOG_RIGHT = 2 // GLRetroView.MOTION_SOURCE_ANALOG_RIGHT
+    /**
+     * @param moveId para onde vai o direcional/analógico da esquerda (DPAD ou ANALOG_LEFT)
+     * @param stickByDefault o console usa analógico por padrão (N64)
+     */
+    class Layout(
+        val leftExtras: List<SecondaryDialConfig>,
+        val rightButtons: List<ButtonConfig>,
+        val rightExtras: List<SecondaryDialConfig>,
+        val moveId: Int = DPAD,
+        val stickByDefault: Boolean = false,
+    ) {
+        fun left(useStick: Boolean, haptic: HapticConfig) = RadialGamePadConfig(
+            sockets = 12,
+            primaryDial = if (useStick) PrimaryDialConfig.Stick(moveId)
+            else PrimaryDialConfig.Cross(CrossConfig(moveId)),
+            secondaryDials = leftExtras,
+            haptic = haptic,
+        )
+
+        fun right(haptic: HapticConfig) = RadialGamePadConfig(
+            sockets = 12,
+            primaryDial = PrimaryDialConfig.PrimaryButtons(rightButtons),
+            secondaryDials = rightExtras,
+            haptic = haptic,
+        )
+    }
 
     private fun btn(id: Int, label: String) = ButtonConfig(id = id, label = label)
 
@@ -41,79 +67,64 @@ object PadLayouts {
     private val L2 = KeyEvent.KEYCODE_BUTTON_L2
     private val R2 = KeyEvent.KEYCODE_BUTTON_R2
 
-    private fun leftCross(vararg extras: SecondaryDialConfig) = RadialGamePadConfig(
-        sockets = 12,
-        primaryDial = PrimaryDialConfig.Cross(CrossConfig(DPAD)),
-        secondaryDials = extras.toList(),
-    )
-
-    private fun rightButtons(buttons: List<ButtonConfig>, vararg extras: SecondaryDialConfig) =
-        RadialGamePadConfig(
-            sockets = 12,
-            primaryDial = PrimaryDialConfig.PrimaryButtons(buttons),
-            secondaryDials = extras.toList(),
-        )
-
     /** NES, Game Boy e Game Boy Color: direcional, A, B, SELECT, START. */
     val NES = Layout(
-        leftCross(extra(2, SELECT, "SELECT")),
-        rightButtons(listOf(btn(A, "A"), btn(B, "B")), extra(4, START, "START")),
+        listOf(extra(2, SELECT, "SELECT")),
+        listOf(btn(A, "A"), btn(B, "B")),
+        listOf(extra(4, START, "START")),
     )
 
     val GAME_BOY = NES
 
     val GBA = Layout(
-        leftCross(extra(2, SELECT, "SELECT"), extra(3, L1, "L")),
-        rightButtons(listOf(btn(A, "A"), btn(B, "B")), extra(3, R1, "R"), extra(4, START, "START")),
+        listOf(extra(2, SELECT, "SELECT"), extra(3, L1, "L")),
+        listOf(btn(A, "A"), btn(B, "B")),
+        listOf(extra(3, R1, "R"), extra(4, START, "START")),
     )
 
     /** SNES e DS: A (direita), X (cima), Y (esquerda), B (baixo). */
     val SNES = Layout(
-        leftCross(extra(2, SELECT, "SELECT"), extra(3, L1, "L")),
-        rightButtons(
-            listOf(btn(A, "A"), btn(X, "X"), btn(Y, "Y"), btn(B, "B")),
-            extra(3, R1, "R"), extra(4, START, "START"),
-        ),
+        listOf(extra(2, SELECT, "SELECT"), extra(3, L1, "L")),
+        listOf(btn(A, "A"), btn(X, "X"), btn(Y, "Y"), btn(B, "B")),
+        listOf(extra(3, R1, "R"), extra(4, START, "START")),
     )
 
     val NDS = SNES
 
     /** Master System e Game Gear: botões 1 e 2. */
     val SMS = Layout(
-        leftCross(),
-        rightButtons(listOf(btn(A, "2"), btn(B, "1")), extra(4, START, "START")),
+        emptyList(),
+        listOf(btn(A, "2"), btn(B, "1")),
+        listOf(extra(4, START, "START")),
     )
 
     /** Mega Drive (3 botões): A, B, C. */
     val MEGA_DRIVE = Layout(
-        leftCross(),
-        rightButtons(listOf(btn(A, "C"), btn(B, "B"), btn(Y, "A")), extra(4, START, "START")),
+        emptyList(),
+        listOf(btn(A, "C"), btn(B, "B"), btn(Y, "A")),
+        listOf(extra(4, START, "START")),
     )
 
     /** PlayStation: ○ △ □ ✕ + L1/L2/R1/R2. */
     val PSX = Layout(
-        leftCross(extra(2, SELECT, "SELECT"), extra(3, L1, "L1"), extra(4, L2, "L2")),
-        rightButtons(
-            listOf(btn(A, "○"), btn(X, "△"), btn(Y, "□"), btn(B, "✕")),
-            extra(2, R2, "R2"), extra(3, R1, "R1"), extra(4, START, "START"),
-        ),
+        listOf(extra(2, SELECT, "SELECT"), extra(3, L1, "L1"), extra(4, L2, "L2")),
+        listOf(btn(A, "○"), btn(X, "△"), btn(Y, "□"), btn(B, "✕")),
+        listOf(extra(2, R2, "R2"), extra(3, R1, "R1"), extra(4, START, "START")),
     )
 
-    /** Nintendo 64: analógico, A, B, botões C (no segundo analógico), Z, L, R. */
+    /**
+     * Nintendo 64: analógico (ou setas, que movem o analógico nas 8 direções),
+     * A, B, botões C (no segundo analógico), Z, L, R.
+     */
     val N64 = Layout(
-        RadialGamePadConfig(
-            sockets = 12,
-            primaryDial = PrimaryDialConfig.Stick(ANALOG_LEFT),
-            secondaryDials = listOf(extra(2, L2, "Z"), extra(3, L1, "L")),
+        listOf(extra(2, L2, "Z"), extra(3, L1, "L")),
+        listOf(btn(B, "A"), btn(Y, "B")),
+        listOf(
+            extra(3, R1, "R"),
+            extra(4, START, "START"),
+            SecondaryDialConfig.Stick(8, 2, 1f, 0f, ANALOG_RIGHT, contentDescription = "C"),
         ),
-        RadialGamePadConfig(
-            sockets = 12,
-            primaryDial = PrimaryDialConfig.PrimaryButtons(listOf(btn(B, "A"), btn(Y, "B"))),
-            secondaryDials = listOf(
-                extra(3, R1, "R"),
-                extra(4, START, "START"),
-                SecondaryDialConfig.Stick(8, 2, 1f, 0f, ANALOG_RIGHT, contentDescription = "C"),
-            ),
-        ),
+        moveId = ANALOG_LEFT,
+        stickByDefault = true,
     )
 }

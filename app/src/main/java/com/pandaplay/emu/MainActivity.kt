@@ -136,6 +136,9 @@ class MainActivity : AppCompatActivity(), CardActions {
         filtersRow = findViewById(R.id.filters)
 
         findViewById<View>(R.id.btnImport).setOnClickListener { showImportMenu() }
+        findViewById<View>(R.id.btnControls).setOnClickListener {
+            startActivity(Intent(this, ControlSettingsActivity::class.java))
+        }
         findViewById<View>(R.id.btnStore).setOnClickListener {
             startActivity(Intent(this, StoreActivity::class.java))
         }

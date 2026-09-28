@@ -1,5 +1,6 @@
 package com.pandaplay.emu
 
+import android.content.Intent
 import android.content.res.Configuration
 import android.hardware.input.InputManager
 import android.os.Bundle
@@ -28,7 +29,9 @@ import com.swordfish.libretrodroid.ShaderConfig
 import com.swordfish.libretrodroid.Variable
 import com.swordfish.radialgamepad.library.RadialGamePad
 import com.swordfish.radialgamepad.library.event.Event
+import com.swordfish.radialgamepad.library.haptics.HapticConfig
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.launch
@@ -50,7 +53,6 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
 
 
         private const val AUTOSAVE_INTERVAL_MS = 15_000L
-        private const val FAST_SPEED = 3
     }
 
     private lateinit var storage: GameStorage
@@ -60,6 +62,11 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
 
     private lateinit var padsRow: View
     private lateinit var btnFast: TextView
+    private lateinit var controls: ControlSettings
+    private var padJob: Job? = null
+    private var fastSpeed = 3
+    /** Botões do controle Bluetooth pelo nome (A é A) em vez da posição. */
+    private var faceByLabel = false
 
     private var fastForward = false
 
@@ -119,8 +126,9 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
         )
 
         padsRow = findViewById(R.id.padsRow)
-        setupVirtualPad()
+        controls = ControlSettings(this)
         setupHud()
+        applyControlSettings()
         observeErrors()
         startAutosave()
 
@@ -143,9 +151,17 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
         }
     }
 
+    private var firstResume = true
+
     override fun onResume() {
         super.onResume()
         sessionStart = System.currentTimeMillis()
+        // Voltando da tela ⚙: aplica as mudanças de controle sem reiniciar o jogo
+        if (!firstResume && ::retroView.isInitialized) {
+            applyControlSettings()
+            applyLayout()
+        }
+        firstResume = false
     }
 
     override fun onPause() {
@@ -192,8 +208,8 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
 
     private fun toggleFastForward() {
         fastForward = !fastForward
-        retroView.frameSpeed = if (fastForward) FAST_SPEED else 1
-        btnFast.text = if (fastForward) "⏩ ${FAST_SPEED}x" else "⏩ 1x"
+        retroView.frameSpeed = if (fastForward) fastSpeed else 1
+        btnFast.text = if (fastForward) "⏩ ${fastSpeed}x" else "⏩ 1x"
     }
 
     private fun runHotkey(hotkey: Hotkey) = when (hotkey) {
@@ -209,39 +225,116 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
         btnFast.setOnClickListener { toggleFastForward() }
         findViewById<View>(R.id.btnSaveState).setOnClickListener { saveState() }
         findViewById<View>(R.id.btnLoadState).setOnClickListener { loadState() }
+        findViewById<View>(R.id.btnControls).setOnClickListener {
+            startActivity(
+                Intent(this, ControlSettingsActivity::class.java)
+                    .putExtra(ControlSettingsActivity.EXTRA_PLATFORM, platform.name)
+            )
+        }
     }
 
+    /**
+     * Monta o controle na tela conforme as configurações (setas ou analógico, tamanho,
+     * posição, vibração). É chamado de novo ao voltar da tela ⚙, sem reiniciar o jogo.
+     */
     private fun setupVirtualPad() {
-        val left = RadialGamePad(platform.pad.left, 8f, this).apply {
-            gravityX = -1f; gravityY = 1f
+        val c = controls
+        val p = platform
+        val dpad = c.get(ControlSettings.Setting.DPAD, p)
+        val useStick = when (dpad) {
+            "stick" -> true
+            "cross" -> false
+            else -> p.pad.stickByDefault
         }
-        val right = RadialGamePad(platform.pad.right, 8f, this).apply {
-            gravityX = 1f; gravityY = 1f
+        val haptic = if (c.get(ControlSettings.Setting.HAPTIC, p) == "on") HapticConfig.PRESS else HapticConfig.OFF
+        val d = resources.displayMetrics.density
+        val maxSizeDp = padSizeDp()
+        val edgePx = edgeDp() * d
+        val liftPx = when (c.get(ControlSettings.Setting.HEIGHT, p)) {
+            "mid" -> 60 * d
+            "high" -> 130 * d
+            else -> 0f
         }
-        findViewById<FrameLayout>(R.id.leftPad).addView(left)
-        findViewById<FrameLayout>(R.id.rightPad).addView(right)
+        val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
-        lifecycleScope.launch {
+        val left = RadialGamePad(p.pad.left(useStick, haptic), 8f, this).apply {
+            gravityX = -1f; gravityY = 1f
+            primaryDialMaxSizeDp = maxSizeDp
+            offsetX = edgePx
+            offsetY = if (landscape) -liftPx else 0f
+        }
+        val right = RadialGamePad(p.pad.right(haptic), 8f, this).apply {
+            gravityX = 1f; gravityY = 1f
+            primaryDialMaxSizeDp = maxSizeDp
+            offsetX = -edgePx
+            offsetY = if (landscape) -liftPx else 0f
+        }
+        findViewById<FrameLayout>(R.id.leftPad).apply { removeAllViews(); addView(left) }
+        findViewById<FrameLayout>(R.id.rightPad).apply { removeAllViews(); addView(right) }
+
+        padJob?.cancel()
+        padJob = lifecycleScope.launch {
             merge(left.events(), right.events())
                 .flowWithLifecycle(lifecycle, Lifecycle.State.RESUMED)
                 .collect { event ->
                     when (event) {
                         is Event.Button -> retroView.sendKeyEvent(event.action, event.id)
-                        is Event.Direction -> retroView.sendMotionEvent(event.id, event.xAxis, event.yAxis)
+                        is Event.Direction -> {
+                            // Analógico no lugar das setas: vira direcional digital (8 direções)
+                            if (event.id == PadLayouts.DPAD) {
+                                retroView.sendMotionEvent(event.id, digital(event.xAxis), digital(event.yAxis))
+                            } else {
+                                retroView.sendMotionEvent(event.id, event.xAxis, event.yAxis)
+                            }
+                        }
                         else -> Unit
                     }
                 }
         }
     }
 
+    private fun padSizeDp(): Float = when (controls.get(ControlSettings.Setting.SIZE, platform)) {
+        "small" -> 95f
+        "large" -> 170f
+        else -> 130f
+    }
+
+    private fun edgeDp(): Float = when (controls.get(ControlSettings.Setting.EDGE, platform)) {
+        "medium" -> 24f
+        "far" -> 56f
+        else -> 0f
+    }
+
+    private fun digital(v: Float) = when {
+        v > 0.45f -> 1f
+        v < -0.45f -> -1f
+        else -> 0f
+    }
+
+    /** Lê as configurações de controle e aplica tudo (também ao voltar da tela ⚙). */
+    private fun applyControlSettings() {
+        fastSpeed = controls.get(ControlSettings.Setting.FAST, platform).toIntOrNull() ?: 3
+        if (fastForward) retroView.frameSpeed = fastSpeed
+        btnFast.text = if (fastForward) "⏩ ${fastSpeed}x" else "⏩ 1x"
+        faceByLabel = controls.get(ControlSettings.Setting.FACE, platform) == "label"
+        setupVirtualPad()
+        updatePadVisibility()
+    }
+
     /** Com controle físico conectado, o controle virtual some e o jogo ganha a tela toda. */
     private fun updatePadVisibility() {
-        padsRow.visibility = if (InputMapper.hasPhysicalGamepad()) View.GONE else View.VISIBLE
+        val show = when (controls.get(ControlSettings.Setting.SHOW, platform)) {
+            "always" -> true
+            "never" -> false
+            else -> !InputMapper.hasPhysicalGamepad()
+        }
+        padsRow.visibility = if (show) View.VISIBLE else View.GONE
         applyLayout()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        if (::retroView.isInitialized) setupVirtualPad()
         applyLayout()
     }
 
@@ -266,8 +359,9 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
             if (landscape || !padsVisible) {
                 game.layoutParams = FrameLayout.LayoutParams(full, full)
                 padsRow.layoutParams = FrameLayout.LayoutParams(full, full)
-                padsRow.alpha = 0.7f
-                val side = (210 * d).toInt()
+                padsRow.alpha = (controls.get(ControlSettings.Setting.OPACITY, platform).toIntOrNull() ?: 70) / 100f
+                // largura de cada lado cresce com o tamanho do controle e a distância da borda
+                val side = ((padSizeDp() + 70f + edgeDp()) * d).toInt()
                 left?.layoutParams = LinearLayout.LayoutParams(side, full, 0f)
                 right?.layoutParams = LinearLayout.LayoutParams(side, full, 0f)
                 spacer?.layoutParams = LinearLayout.LayoutParams(0, full, 1f)
@@ -333,8 +427,8 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
         // Controle físico: o GLRetroView já converte o layout Android -> RetroPad e escolhe a porta
         if (InputMapper.isGamepad(event) && (event.device?.controllerNumber ?: 0) > 0) {
             return when (event.action) {
-                KeyEvent.ACTION_DOWN -> retroView.onKeyDown(event.keyCode, event)
-                KeyEvent.ACTION_UP -> retroView.onKeyUp(event.keyCode, event)
+                KeyEvent.ACTION_DOWN -> retroView.onKeyDown(faceKey(event.keyCode), event)
+                KeyEvent.ACTION_UP -> retroView.onKeyUp(faceKey(event.keyCode), event)
                 else -> super.dispatchKeyEvent(event)
             }
         }
@@ -395,6 +489,21 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
         }
         retroView.sendMotionEvent(GLRetroView.MOTION_SOURCE_DPAD, x, y, port)
         return true
+    }
+
+    /**
+     * Por padrão o botão vale pela posição (o de baixo é o B, como no Super Nintendo).
+     * Com "pelo nome", o botão escrito A é o A do jogo.
+     */
+    private fun faceKey(keyCode: Int): Int {
+        if (!faceByLabel) return keyCode
+        return when (keyCode) {
+            KeyEvent.KEYCODE_BUTTON_A -> KeyEvent.KEYCODE_BUTTON_B
+            KeyEvent.KEYCODE_BUTTON_B -> KeyEvent.KEYCODE_BUTTON_A
+            KeyEvent.KEYCODE_BUTTON_X -> KeyEvent.KEYCODE_BUTTON_Y
+            KeyEvent.KEYCODE_BUTTON_Y -> KeyEvent.KEYCODE_BUTTON_X
+            else -> keyCode
+        }
     }
 
     private fun deadzone(v: Float) = when {

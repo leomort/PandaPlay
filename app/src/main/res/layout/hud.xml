@@ -22,4 +22,9 @@
         android:id="@+id/btnLoadState"
         style="@style/HudButton"
         android:text="📂" />
+
+    <TextView
+        android:id="@+id/btnControls"
+        style="@style/HudButton"
+        android:text="⚙" />
 </LinearLayout>

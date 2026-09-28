@@ -42,6 +42,10 @@
             android:windowSoftInputMode="stateHidden" />
 
         <activity
+            android:name=".ControlSettingsActivity"
+            android:exported="false" />
+
+        <activity
             android:name=".GameActivity"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation"
             android:exported="false"
