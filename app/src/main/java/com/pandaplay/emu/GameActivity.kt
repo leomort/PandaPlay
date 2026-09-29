@@ -250,24 +250,34 @@ class GameActivity : AppCompatActivity(), InputManager.InputDeviceListener {
         val d = resources.displayMetrics.density
         val maxSizeDp = padSizeDp()
         val edgePx = edgeDp() * d
-        val liftPx = when (c.get(ControlSettings.Setting.HEIGHT, p)) {
-            "mid" -> 60 * d
-            "high" -> 130 * d
-            else -> 0f
-        }
         val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        // Altura: cada posição do celular (deitado / em pé) tem a sua configuração
+        val liftPx = if (landscape) {
+            when (c.get(ControlSettings.Setting.HEIGHT, p)) {
+                "mid" -> 60 * d
+                "high" -> 130 * d
+                else -> 0f
+            }
+        } else {
+            when (c.get(ControlSettings.Setting.HEIGHT_PORTRAIT, p)) {
+                "mid" -> 50 * d
+                "high" -> 100 * d
+                "top" -> 160 * d
+                else -> 0f
+            }
+        }
 
         val left = RadialGamePad(p.pad.left(useStick, haptic), 8f, this).apply {
             gravityX = -1f; gravityY = 1f
             primaryDialMaxSizeDp = maxSizeDp
             offsetX = edgePx
-            offsetY = if (landscape) -liftPx else 0f
+            offsetY = -liftPx
         }
         val right = RadialGamePad(p.pad.right(haptic), 8f, this).apply {
             gravityX = 1f; gravityY = 1f
             primaryDialMaxSizeDp = maxSizeDp
             offsetX = -edgePx
-            offsetY = if (landscape) -liftPx else 0f
+            offsetY = -liftPx
         }
         findViewById<FrameLayout>(R.id.leftPad).apply { removeAllViews(); addView(left) }
         findViewById<FrameLayout>(R.id.rightPad).apply { removeAllViews(); addView(right) }
