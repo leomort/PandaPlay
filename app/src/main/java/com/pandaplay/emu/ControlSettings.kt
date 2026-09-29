@@ -40,6 +40,16 @@ class ControlSettings(context: Context) {
             listOf("low" to "Embaixo", "mid" to "Um pouco acima", "high" to "No meio"),
             "low",
         ),
+        HEIGHT_PORTRAIT(
+            "height_portrait", "Altura do controle (celular em pé)", "Controle na tela",
+            listOf(
+                "low" to "Embaixo",
+                "mid" to "Um pouco acima",
+                "high" to "Mais acima",
+                "top" to "Perto do jogo",
+            ),
+            "low",
+        ),
         HAPTIC(
             "haptic", "Vibrar ao tocar", "Controle na tela",
             listOf("on" to "Sim", "off" to "Não"),
